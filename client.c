@@ -11,6 +11,10 @@
 #include <pthread.h>
 #include <errno.h>
 #include <stdbool.h>
+#include "openssl/ssl.h"
+#include "openssl/err.h"
+
+
 #define CONNECTION_PORT 3500
 
 
@@ -20,6 +24,74 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 char recipient[20] = ""; 
 
 char buff[1024];
+
+SSL_CTX *ctx;
+
+SSL *ssl;
+
+
+
+
+
+SSL_CTX* InitCTX(void) {
+
+    SSL_METHOD *method;
+    SSL_CTX *ctx;
+
+    OpenSSL_add_all_algorithms();
+
+    SSL_load_error_strings();
+
+    method = (SSL_METHOD *)TLS_client_method();
+
+    ctx = SSL_CTX_new(method);
+
+    if (ctx == NULL) {
+        ERR_print_errors_fp(stderr);
+        abort();
+    }
+
+    return ctx;
+}
+
+void ShowCerts(SSL* ssl) {
+
+    char *line;
+    X509 *cert;
+    
+    // get the server's certificate
+    cert = SSL_get_peer_certificate(ssl);
+    
+    if (cert != NULL) {
+
+        printf("Server certificates:\n");
+
+        line = X509_NAME_oneline(X509_get_subject_name(cert), 0, 0);
+        printf("Subject: %s\n", line);
+        free(line);
+
+        line = X509_NAME_oneline(X509_get_issuer_name(cert), 0, 0);
+        printf("Issuer: %s\n", line);
+        free(line);
+
+        X509_free(cert);
+    }
+    else
+        printf("Info: No client certificates configured.\n");
+}
+
+
+
+void send_message(int socket, const char * message) {
+
+    if(SSL_accept(ssl) != -1){
+        SSL_write(ssl, message, strlen(message));
+    }else{
+        SSL_write(ssl, "SSL error", strlen("SSL error"));
+    }
+
+}
+
 
 
 
@@ -36,7 +108,7 @@ void *receive_messages(void *arg) {
         memset(buff, 0,1024);
         pthread_mutex_unlock(&mutex);
 
-        ssize_t res = recv(socket_send, buff, sizeof(buff) - 1, 0);
+        ssize_t res = SSL_read(ssl, buff, sizeof(buff));
         
         if (res <= 0) {
             printf("Server disconnected\n");
@@ -57,8 +129,13 @@ void *receive_messages(void *arg) {
 
 int main()
 
-
 {
+
+    SSL_library_init();
+
+    ctx = InitCTX();
+
+
     
     int socketClient = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -81,6 +158,17 @@ int main()
     } 
 
 
+    ssl = SSL_new(ctx);
+
+    SSL_set_fd(ssl, socketClient);
+
+    if (SSL_connect(ssl) == -1){
+        ERR_print_errors_fp(stderr);
+    }
+
+    ShowCerts(ssl);
+
+
     printf("socket : %d", socketClient);
 
     printf("Connected\n");
@@ -90,15 +178,17 @@ int main()
 
     char username[20];
 
+    memset(rcv, 0, sizeof(rcv));
+
     
-    int len = recv(socketClient, rcv, sizeof(rcv), 0);
+    int len = SSL_read(ssl, rcv, sizeof(rcv));
 
     if(len == -1 && errno != EAGAIN){
         printf("ERRNO [%i] : %s \n", errno, strerror(errno));
         exit(EXIT_FAILURE);
     }
 
-    printf("\n%s", rcv);
+    printf("%s", rcv);
 
     fflush(stdout);
 
@@ -109,10 +199,9 @@ int main()
     } 
 
 
-    if(send(socketClient, username, strlen(username), 0) == -1){
-        printf("ERRNO [%i] : %s \n", errno, strerror(errno));
-        exit(EXIT_FAILURE);
-    }
+    send_message(socketClient, username);
+
+
 
 
     pthread_t receive_thread;
@@ -126,7 +215,7 @@ int main()
 
     while(1){
 
-        printf("\n> ");
+        printf("\n>");
 
         fflush(stdout);
         
@@ -138,10 +227,9 @@ int main()
         }
 
         pthread_mutex_lock(&mutex);
-        if(send(socketClient,inputMsg, strlen(inputMsg), 0) == -1){
-            printf("ERRNO [%i] : %s \n", errno, strerror(errno));
-            exit(EXIT_FAILURE);
-        }
+
+        send_message(socketClient, inputMsg);
+
 
         pthread_mutex_unlock(&mutex);
         
@@ -153,6 +241,9 @@ int main()
     
         if (memcmp(inputMsg, "/exit", 5) == 0) {
             printf("Closing connection\n");
+
+            SSL_free(ssl);
+
             break;
         }
 
@@ -162,6 +253,8 @@ int main()
 
     
     close(socketClient);
+
+    SSL_CTX_free(ctx);
 
 
 
